@@ -12,5 +12,12 @@
       "database_name": "memorylink-production",
       "database_id": "local-dev-db"
     }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "memorylink-files",
+      "preview_bucket_name": "memorylink-files-preview"
+    }
   ]
 }

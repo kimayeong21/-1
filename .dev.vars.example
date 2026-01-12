@@ -1,0 +1,6 @@
+# Local development environment variables
+# OpenAI API 키 (선택사항 - AI 자동 분석 기능 사용 시 필요)
+# OPENAI_API_KEY=sk-your-api-key-here
+
+# 프로덕션 배포 시에는 다음 명령어로 시크릿 설정:
+# npx wrangler pages secret put OPENAI_API_KEY --project-name memorylink
