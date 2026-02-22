@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 
 type Bindings = {
   DB: D1Database;
@@ -7,12 +8,66 @@ type Bindings = {
   OPENAI_API_KEY: string;
 }
 
-const app = new Hono<{ Bindings: Bindings }>()
+type Variables = {
+  user: any;
+}
 
-// Enable CORS for API routes
-app.use('/api/*', cors())
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 // ==================== Helper Functions ====================
+
+// Simple password hashing using Web Crypto API
+async function hashPassword(password: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const data = encoder.encode(password)
+  const hash = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+// Generate session ID
+function generateSessionId(): string {
+  return crypto.randomUUID()
+}
+
+// Session expiry (7 days)
+function getExpiryDate(): string {
+  const date = new Date()
+  date.setDate(date.getDate() + 7)
+  return date.toISOString()
+}
+
+// Auth middleware
+async function authMiddleware(c: any, next: any) {
+  const sessionId = getCookie(c, 'session_id')
+  
+  if (!sessionId) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const { DB } = c.env
+  const session = await DB.prepare(`
+    SELECT s.*, u.id, u.email, u.name, u.avatar_url 
+    FROM sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.id = ? AND s.expires_at > datetime('now')
+  `).bind(sessionId).first()
+
+  if (!session) {
+    deleteCookie(c, 'session_id')
+    return c.json({ error: 'Session expired' }, 401)
+  }
+
+  c.set('user', {
+    id: session.user_id,
+    email: session.email,
+    name: session.name,
+    avatar_url: session.avatar_url
+  })
+
+  await next()
+}
 
 // AI Analysis with OpenAI
 async function analyzeWithAI(text: string, apiKey?: string) {
@@ -55,7 +110,6 @@ async function analyzeWithAI(text: string, apiKey?: string) {
     const data = await response.json()
     const content = data.choices[0].message.content
 
-    // Try to parse JSON response
     try {
       const parsed = JSON.parse(content)
       return {
@@ -64,7 +118,6 @@ async function analyzeWithAI(text: string, apiKey?: string) {
         keywords: parsed.keywords || []
       }
     } catch {
-      // Fallback if not valid JSON
       return {
         summary: content.substring(0, 100),
         sentiment: 'neutral',
@@ -81,18 +134,156 @@ async function analyzeWithAI(text: string, apiKey?: string) {
   }
 }
 
-// ==================== API Routes ====================
+// ==================== Auth Routes ====================
 
-// Get all categories
+// Enable CORS for all routes
+app.use('*', cors({
+  origin: '*',
+  credentials: true
+}))
+
+// Register
+app.post('/api/auth/register', async (c) => {
+  const { DB } = c.env
+  const { email, password, name } = await c.req.json()
+
+  if (!email || !password || !name) {
+    return c.json({ error: '모든 필드를 입력해주세요' }, 400)
+  }
+
+  // Check if user exists
+  const existingUser = await DB.prepare('SELECT id FROM users WHERE email = ?')
+    .bind(email)
+    .first()
+
+  if (existingUser) {
+    return c.json({ error: '이미 존재하는 이메일입니다' }, 400)
+  }
+
+  // Hash password
+  const hashedPassword = await hashPassword(password)
+
+  // Create user
+  const result = await DB.prepare(`
+    INSERT INTO users (email, password, name, avatar_url)
+    VALUES (?, ?, ?, ?)
+  `).bind(email, hashedPassword, name, `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=667eea&color=fff`).run()
+
+  const userId = result.meta.last_row_id
+
+  // Create session
+  const sessionId = generateSessionId()
+  const expiresAt = getExpiryDate()
+
+  await DB.prepare(`
+    INSERT INTO sessions (id, user_id, expires_at)
+    VALUES (?, ?, ?)
+  `).bind(sessionId, userId, expiresAt).run()
+
+  // Set cookie
+  setCookie(c, 'session_id', sessionId, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    maxAge: 7 * 24 * 60 * 60, // 7 days
+    path: '/'
+  })
+
+  return c.json({
+    success: true,
+    user: {
+      id: userId,
+      email,
+      name,
+      avatar_url: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=667eea&color=fff`
+    }
+  })
+})
+
+// Login
+app.post('/api/auth/login', async (c) => {
+  const { DB } = c.env
+  const { email, password } = await c.req.json()
+
+  if (!email || !password) {
+    return c.json({ error: '이메일과 비밀번호를 입력해주세요' }, 400)
+  }
+
+  // Hash password
+  const hashedPassword = await hashPassword(password)
+
+  // Find user
+  const user = await DB.prepare(`
+    SELECT id, email, name, avatar_url, password
+    FROM users
+    WHERE email = ? AND password = ?
+  `).bind(email, hashedPassword).first()
+
+  if (!user) {
+    return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다' }, 401)
+  }
+
+  // Create session
+  const sessionId = generateSessionId()
+  const expiresAt = getExpiryDate()
+
+  await DB.prepare(`
+    INSERT INTO sessions (id, user_id, expires_at)
+    VALUES (?, ?, ?)
+  `).bind(sessionId, user.id, expiresAt).run()
+
+  // Set cookie
+  setCookie(c, 'session_id', sessionId, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    maxAge: 7 * 24 * 60 * 60,
+    path: '/'
+  })
+
+  return c.json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar_url: user.avatar_url
+    }
+  })
+})
+
+// Logout
+app.post('/api/auth/logout', async (c) => {
+  const { DB } = c.env
+  const sessionId = getCookie(c, 'session_id')
+
+  if (sessionId) {
+    await DB.prepare('DELETE FROM sessions WHERE id = ?').bind(sessionId).run()
+  }
+
+  deleteCookie(c, 'session_id')
+  return c.json({ success: true })
+})
+
+// Get current user
+app.get('/api/auth/me', authMiddleware, async (c) => {
+  const user = c.get('user')
+  return c.json({ user })
+})
+
+// ==================== Protected API Routes ====================
+
+// Get all categories (public)
 app.get('/api/categories', async (c) => {
   const { DB } = c.env
   const result = await DB.prepare('SELECT * FROM categories ORDER BY name').all()
   return c.json(result.results)
 })
 
-// Get all memories with pagination
-app.get('/api/memories', async (c) => {
+// Get all memories with pagination (protected)
+app.get('/api/memories', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   const page = parseInt(c.req.query('page') || '1')
   const limit = parseInt(c.req.query('limit') || '20')
   const category = c.req.query('category')
@@ -103,9 +294,9 @@ app.get('/api/memories', async (c) => {
     SELECT m.*, c.name as category_name, c.icon as category_icon, c.color as category_color
     FROM memories m
     LEFT JOIN categories c ON m.category_id = c.id
-    WHERE 1=1
+    WHERE m.user_id = ?
   `
-  const params: any[] = []
+  const params: any[] = [user.id]
 
   if (category) {
     query += ' AND m.category_id = ?'
@@ -124,8 +315,8 @@ app.get('/api/memories', async (c) => {
   const result = await DB.prepare(query).bind(...params).all()
   
   // Get total count
-  let countQuery = 'SELECT COUNT(*) as total FROM memories WHERE 1=1'
-  const countParams: any[] = []
+  let countQuery = 'SELECT COUNT(*) as total FROM memories WHERE user_id = ?'
+  const countParams: any[] = [user.id]
   if (category) {
     countQuery += ' AND category_id = ?'
     countParams.push(parseInt(category))
@@ -148,17 +339,18 @@ app.get('/api/memories', async (c) => {
   })
 })
 
-// Get single memory by ID
-app.get('/api/memories/:id', async (c) => {
+// Get single memory by ID (protected)
+app.get('/api/memories/:id', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   const id = c.req.param('id')
   
   const memory = await DB.prepare(`
     SELECT m.*, c.name as category_name, c.icon as category_icon, c.color as category_color
     FROM memories m
     LEFT JOIN categories c ON m.category_id = c.id
-    WHERE m.id = ?
-  `).bind(id).first()
+    WHERE m.id = ? AND m.user_id = ?
+  `).bind(id, user.id).first()
 
   if (!memory) {
     return c.json({ error: 'Memory not found' }, 404)
@@ -169,8 +361,8 @@ app.get('/api/memories/:id', async (c) => {
     SELECT m.*, conn.connection_type, conn.strength
     FROM connections conn
     JOIN memories m ON (conn.memory_id_2 = m.id OR conn.memory_id_1 = m.id)
-    WHERE (conn.memory_id_1 = ? OR conn.memory_id_2 = ?) AND m.id != ?
-  `).bind(id, id, id).all()
+    WHERE (conn.memory_id_1 = ? OR conn.memory_id_2 = ?) AND m.id != ? AND m.user_id = ?
+  `).bind(id, id, id, user.id).all()
 
   return c.json({
     ...memory,
@@ -178,8 +370,8 @@ app.get('/api/memories/:id', async (c) => {
   })
 })
 
-// Upload file to R2
-app.post('/api/upload', async (c) => {
+// Upload file to R2 (protected)
+app.post('/api/upload', authMiddleware, async (c) => {
   const { BUCKET } = c.env
   
   if (!BUCKET) {
@@ -194,13 +386,11 @@ app.post('/api/upload', async (c) => {
       return c.json({ error: 'No file provided' }, 400)
     }
 
-    // Generate unique filename
     const timestamp = Date.now()
     const randomStr = Math.random().toString(36).substring(7)
     const extension = file.name.split('.').pop()
     const key = `uploads/${timestamp}-${randomStr}.${extension}`
 
-    // Upload to R2
     const arrayBuffer = await file.arrayBuffer()
     await BUCKET.put(key, arrayBuffer, {
       httpMetadata: {
@@ -208,7 +398,6 @@ app.post('/api/upload', async (c) => {
       }
     })
 
-    // Return public URL (you'll need to set up a public domain for R2)
     const fileUrl = `/api/files/${key}`
 
     return c.json({
@@ -254,13 +443,13 @@ app.get('/api/files/*', async (c) => {
   }
 })
 
-// Create new memory with AI analysis
-app.post('/api/memories', async (c) => {
+// Create new memory with AI analysis (protected)
+app.post('/api/memories', authMiddleware, async (c) => {
   const { DB, OPENAI_API_KEY } = c.env
+  const user = c.get('user')
   const body = await c.req.json()
   
   const { 
-    user_id = 1, 
     category_id, 
     title, 
     description, 
@@ -277,7 +466,6 @@ app.post('/api/memories', async (c) => {
     return c.json({ error: 'Title is required' }, 400)
   }
 
-  // AI Analysis
   let ai_summary = null
   let ai_sentiment = null
   let ai_keywords = null
@@ -297,7 +485,7 @@ app.post('/api/memories', async (c) => {
       importance_score, original_date
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
-    user_id,
+    user.id,
     category_id || null,
     title,
     description || null,
@@ -319,11 +507,18 @@ app.post('/api/memories', async (c) => {
   return c.json(newMemory, 201)
 })
 
-// Update memory
-app.put('/api/memories/:id', async (c) => {
+// Update memory (protected)
+app.put('/api/memories/:id', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   const id = c.req.param('id')
   const body = await c.req.json()
+
+  // Check ownership
+  const existing = await DB.prepare('SELECT user_id FROM memories WHERE id = ?').bind(id).first()
+  if (!existing || existing.user_id !== user.id) {
+    return c.json({ error: 'Unauthorized' }, 403)
+  }
 
   const { 
     category_id, 
@@ -417,42 +612,54 @@ app.put('/api/memories/:id', async (c) => {
   return c.json(updatedMemory)
 })
 
-// Delete memory
-app.delete('/api/memories/:id', async (c) => {
+// Delete memory (protected)
+app.delete('/api/memories/:id', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   const id = c.req.param('id')
+
+  // Check ownership
+  const existing = await DB.prepare('SELECT user_id FROM memories WHERE id = ?').bind(id).first()
+  if (!existing || existing.user_id !== user.id) {
+    return c.json({ error: 'Unauthorized' }, 403)
+  }
 
   await DB.prepare('DELETE FROM memories WHERE id = ?').bind(id).run()
   return c.json({ success: true })
 })
 
-// Get statistics
-app.get('/api/statistics', async (c) => {
+// Get statistics (protected)
+app.get('/api/statistics', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
 
-  const totalMemories = await DB.prepare('SELECT COUNT(*) as count FROM memories').first()
+  const totalMemories = await DB.prepare('SELECT COUNT(*) as count FROM memories WHERE user_id = ?')
+    .bind(user.id)
+    .first()
+    
   const categoriesCount = await DB.prepare(`
     SELECT c.name, c.icon, c.color, COUNT(m.id) as count
     FROM categories c
-    LEFT JOIN memories m ON c.id = m.category_id
+    LEFT JOIN memories m ON c.id = m.category_id AND m.user_id = ?
     GROUP BY c.id, c.name, c.icon, c.color
     ORDER BY count DESC
-  `).all()
+  `).bind(user.id).all()
   
   const recentMemories = await DB.prepare(`
     SELECT m.*, c.name as category_name, c.icon as category_icon
     FROM memories m
     LEFT JOIN categories c ON m.category_id = c.id
+    WHERE m.user_id = ?
     ORDER BY m.created_at DESC
     LIMIT 5
-  `).all()
+  `).bind(user.id).all()
 
   const sentimentStats = await DB.prepare(`
     SELECT ai_sentiment, COUNT(*) as count
     FROM memories
-    WHERE ai_sentiment IS NOT NULL
+    WHERE ai_sentiment IS NOT NULL AND user_id = ?
     GROUP BY ai_sentiment
-  `).all()
+  `).bind(user.id).all()
 
   return c.json({
     total: totalMemories?.count || 0,
@@ -462,13 +669,22 @@ app.get('/api/statistics', async (c) => {
   })
 })
 
-// Create connection between memories
-app.post('/api/connections', async (c) => {
+// Create connection between memories (protected)
+app.post('/api/connections', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   const { memory_id_1, memory_id_2, connection_type = 'related', strength = 5 } = await c.req.json()
 
   if (!memory_id_1 || !memory_id_2) {
     return c.json({ error: 'Both memory IDs are required' }, 400)
+  }
+
+  // Verify ownership
+  const mem1 = await DB.prepare('SELECT user_id FROM memories WHERE id = ?').bind(memory_id_1).first()
+  const mem2 = await DB.prepare('SELECT user_id FROM memories WHERE id = ?').bind(memory_id_2).first()
+  
+  if (!mem1 || !mem2 || mem1.user_id !== user.id || mem2.user_id !== user.id) {
+    return c.json({ error: 'Unauthorized' }, 403)
   }
 
   const result = await DB.prepare(`
@@ -479,17 +695,31 @@ app.post('/api/connections', async (c) => {
   return c.json({ success: true, id: result.meta.last_row_id }, 201)
 })
 
-// Export data as JSON
-app.get('/api/export', async (c) => {
+// Export data as JSON (protected)
+app.get('/api/export', authMiddleware, async (c) => {
   const { DB } = c.env
+  const user = c.get('user')
   
-  const memories = await DB.prepare('SELECT * FROM memories ORDER BY created_at DESC').all()
+  const memories = await DB.prepare('SELECT * FROM memories WHERE user_id = ? ORDER BY created_at DESC')
+    .bind(user.id)
+    .all()
+    
   const categories = await DB.prepare('SELECT * FROM categories').all()
-  const connections = await DB.prepare('SELECT * FROM connections').all()
+  
+  const connections = await DB.prepare(`
+    SELECT c.* FROM connections c
+    JOIN memories m1 ON c.memory_id_1 = m1.id
+    JOIN memories m2 ON c.memory_id_2 = m2.id
+    WHERE m1.user_id = ? AND m2.user_id = ?
+  `).bind(user.id, user.id).all()
   
   const exportData = {
-    version: '1.0',
+    version: '2.0',
     exported_at: new Date().toISOString(),
+    user: {
+      email: user.email,
+      name: user.name
+    },
     data: {
       memories: memories.results,
       categories: categories.results,
@@ -574,221 +804,386 @@ app.get('/', (c) => {
             -webkit-box-orient: vertical;
             overflow: hidden;
           }
+          .auth-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          }
+          .hidden { display: none !important; }
         </style>
     </head>
     <body class="bg-gray-50">
-        <!-- Header -->
-        <header class="bg-white shadow-sm sticky top-0 z-40">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-                <div class="flex items-center justify-between">
-                    <div class="flex items-center space-x-3">
-                        <i class="fas fa-heart text-3xl text-purple-600"></i>
+        <!-- Auth Container -->
+        <div id="auth-container" class="auth-container">
+            <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md mx-4">
+                <div class="text-center mb-8">
+                    <i class="fas fa-heart text-5xl text-purple-600 mb-4"></i>
+                    <h1 class="text-3xl font-bold text-gray-900">MemoryLink</h1>
+                    <p class="text-gray-600 mt-2">AI 기반 디지털 유품 정리 서비스</p>
+                </div>
+
+                <!-- Login Form -->
+                <div id="login-form" class="space-y-6">
+                    <h2 class="text-2xl font-bold text-gray-900">로그인</h2>
+                    <form id="login-submit" class="space-y-4">
                         <div>
-                            <h1 class="text-2xl font-bold text-gray-900">MemoryLink</h1>
-                            <p class="text-xs text-gray-500">AI 기반 디지털 유품 관리</p>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">이메일</label>
+                            <input type="email" id="login-email" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
                         </div>
-                    </div>
-                    <nav class="flex space-x-2">
-                        <button onclick="showView('dashboard')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
-                            <i class="fas fa-home mr-1"></i>대시보드
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">비밀번호</label>
+                            <input type="password" id="login-password" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-semibold">
+                            로그인
                         </button>
-                        <button onclick="showView('memories')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
-                            <i class="fas fa-images mr-1"></i>추억
-                        </button>
-                        <button onclick="showView('timeline')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
-                            <i class="fas fa-stream mr-1"></i>타임라인
-                        </button>
-                        <button onclick="exportData()" class="px-3 py-2 text-sm text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-lg transition">
-                            <i class="fas fa-download mr-1"></i>내보내기
-                        </button>
-                        <button onclick="showAddMemory()" class="px-3 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
-                            <i class="fas fa-plus mr-1"></i>추억 추가
-                        </button>
-                    </nav>
-                </div>
-            </div>
-        </header>
-
-        <!-- Main Content -->
-        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <!-- Dashboard View -->
-            <div id="dashboard-view" class="view-section">
-                <h2 class="text-3xl font-bold text-gray-900 mb-6">대시보드</h2>
-                
-                <!-- Statistics -->
-                <div id="statistics" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                    <div class="stat-card text-white p-6 rounded-xl">
-                        <i class="fas fa-database text-3xl mb-2"></i>
-                        <p class="text-sm opacity-90">총 추억</p>
-                        <p id="total-memories" class="text-4xl font-bold">0</p>
-                    </div>
-                    <div class="bg-gradient-to-br from-green-400 to-green-600 text-white p-6 rounded-xl">
-                        <i class="fas fa-smile text-3xl mb-2"></i>
-                        <p class="text-sm opacity-90">긍정적 추억</p>
-                        <p id="positive-memories" class="text-4xl font-bold">0</p>
-                    </div>
-                    <div class="bg-gradient-to-br from-blue-400 to-blue-600 text-white p-6 rounded-xl">
-                        <i class="fas fa-meh text-3xl mb-2"></i>
-                        <p class="text-sm opacity-90">중립적 추억</p>
-                        <p id="neutral-memories" class="text-4xl font-bold">0</p>
-                    </div>
-                    <div class="bg-gradient-to-br from-orange-400 to-orange-600 text-white p-6 rounded-xl">
-                        <i class="fas fa-chart-line text-3xl mb-2"></i>
-                        <p class="text-sm opacity-90">평균 중요도</p>
-                        <p id="avg-importance" class="text-4xl font-bold">0</p>
-                    </div>
-                </div>
-
-                <!-- Categories -->
-                <div class="bg-white rounded-xl shadow-sm p-6 mb-8">
-                    <h3 class="text-xl font-bold text-gray-900 mb-4">카테고리별 분포</h3>
-                    <div id="categories-chart" class="space-y-3"></div>
-                </div>
-
-                <!-- Recent Memories -->
-                <div class="bg-white rounded-xl shadow-sm p-6">
-                    <h3 class="text-xl font-bold text-gray-900 mb-4">최근 추억</h3>
-                    <div id="recent-memories" class="space-y-3"></div>
-                </div>
-            </div>
-
-            <!-- Memories View -->
-            <div id="memories-view" class="view-section hidden">
-                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-                    <h2 class="text-3xl font-bold text-gray-900">내 추억</h2>
-                    <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-                        <select id="category-filter" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                            <option value="">모든 카테고리</option>
-                        </select>
-                        <input id="search-input" type="text" placeholder="검색..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                    </div>
-                </div>
-                
-                <div id="memories-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"></div>
-                
-                <!-- Pagination -->
-                <div id="pagination" class="flex justify-center mt-8 space-x-2"></div>
-            </div>
-
-            <!-- Timeline View -->
-            <div id="timeline-view" class="view-section hidden">
-                <h2 class="text-3xl font-bold text-gray-900 mb-6">타임라인</h2>
-                <div id="timeline-content" class="space-y-6"></div>
-            </div>
-
-            <!-- Add/Edit Memory Modal -->
-            <div id="memory-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
-                <div class="bg-white rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-                    <div class="p-6">
-                        <div class="flex justify-between items-center mb-6">
-                            <h3 id="modal-title" class="text-2xl font-bold text-gray-900">추억 추가</h3>
-                            <button onclick="closeModal()" class="text-gray-500 hover:text-gray-700">
-                                <i class="fas fa-times text-2xl"></i>
+                    </form>
+                    <div class="text-center">
+                        <p class="text-gray-600">
+                            계정이 없으신가요?
+                            <button onclick="showRegister()" class="text-purple-600 hover:text-purple-700 font-semibold">
+                                회원가입
                             </button>
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Register Form -->
+                <div id="register-form" class="space-y-6 hidden">
+                    <h2 class="text-2xl font-bold text-gray-900">회원가입</h2>
+                    <form id="register-submit" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">이름</label>
+                            <input type="text" id="register-name" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
                         </div>
-                        
-                        <form id="memory-form" class="space-y-4">
-                            <input type="hidden" id="memory-id">
-                            
-                            <!-- File Upload Area -->
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">
-                                    파일 업로드 (이미지/동영상)
-                                </label>
-                                <div id="upload-area" class="upload-area p-8 rounded-lg text-center cursor-pointer">
-                                    <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-2"></i>
-                                    <p class="text-sm text-gray-600">클릭하거나 파일을 드래그하세요</p>
-                                    <p class="text-xs text-gray-400 mt-1">또는 아래에 URL을 직접 입력하세요</p>
-                                    <input type="file" id="file-input" class="hidden" accept="image/*,video/*">
-                                </div>
-                                <input type="text" id="file-url" placeholder="또는 파일 URL 입력" class="mt-2 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 text-sm">
-                                <div id="file-preview" class="mt-2"></div>
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">제목 *</label>
-                                <input type="text" id="title" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">카테고리</label>
-                                <select id="category" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                                    <option value="">선택하세요</option>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">설명</label>
-                                <textarea id="description" rows="3" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"></textarea>
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">내용</label>
-                                <textarea id="content" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"></textarea>
-                            </div>
-
-                            <div>
-                                <label class="flex items-center space-x-2">
-                                    <input type="checkbox" id="auto-analyze" checked class="rounded text-purple-600 focus:ring-purple-500">
-                                    <span class="text-sm text-gray-700">
-                                        <i class="fas fa-robot text-purple-600"></i>
-                                        AI 자동 분석 (요약, 감정, 키워드)
-                                    </span>
-                                </label>
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">중요도 (1-10)</label>
-                                <input type="range" id="importance-score" min="1" max="10" value="5" class="w-full">
-                                <div class="flex justify-between text-xs text-gray-500">
-                                    <span>1</span>
-                                    <span id="importance-value" class="font-bold text-purple-600">5</span>
-                                    <span>10</span>
-                                </div>
-                            </div>
-                            
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">원본 날짜</label>
-                                <input type="datetime-local" id="original-date" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-                            </div>
-                            
-                            <div class="flex justify-end space-x-3 pt-4">
-                                <button type="button" onclick="closeModal()" class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                                    취소
-                                </button>
-                                <button type="submit" class="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
-                                    <i class="fas fa-save mr-2"></i>저장
-                                </button>
-                            </div>
-                        </form>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">이메일</label>
+                            <input type="email" id="register-email" required class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">비밀번호</label>
+                            <input type="password" id="register-password" required minlength="6" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                            <p class="text-xs text-gray-500 mt-1">최소 6자 이상</p>
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-semibold">
+                            가입하기
+                        </button>
+                    </form>
+                    <div class="text-center">
+                        <p class="text-gray-600">
+                            이미 계정이 있으신가요?
+                            <button onclick="showLogin()" class="text-purple-600 hover:text-purple-700 font-semibold">
+                                로그인
+                            </button>
+                        </p>
                     </div>
                 </div>
             </div>
+        </div>
 
-            <!-- Memory Detail Modal -->
-            <div id="detail-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
-                <div class="bg-white rounded-xl shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-                    <div class="p-6" id="detail-content">
-                        <!-- Content loaded dynamically -->
+        <!-- Main App Container (hidden until logged in) -->
+        <div id="main-app" class="hidden">
+            <!-- Header -->
+            <header class="bg-white shadow-sm sticky top-0 z-40">
+                <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center space-x-3">
+                            <i class="fas fa-heart text-3xl text-purple-600"></i>
+                            <div>
+                                <h1 class="text-2xl font-bold text-gray-900">MemoryLink</h1>
+                                <p class="text-xs text-gray-500">AI 기반 디지털 유품 관리</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center space-x-4">
+                            <nav class="hidden md:flex space-x-2">
+                                <button onclick="showView('dashboard')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
+                                    <i class="fas fa-home mr-1"></i>대시보드
+                                </button>
+                                <button onclick="showView('memories')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
+                                    <i class="fas fa-images mr-1"></i>추억
+                                </button>
+                                <button onclick="showView('timeline')" class="nav-btn px-3 py-2 text-sm text-gray-700 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition">
+                                    <i class="fas fa-stream mr-1"></i>타임라인
+                                </button>
+                                <button onclick="exportData()" class="px-3 py-2 text-sm text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-lg transition">
+                                    <i class="fas fa-download mr-1"></i>내보내기
+                                </button>
+                                <button onclick="showAddMemory()" class="px-3 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
+                                    <i class="fas fa-plus mr-1"></i>추억 추가
+                                </button>
+                            </nav>
+                            <div class="flex items-center space-x-2">
+                                <img id="user-avatar" src="" alt="User" class="w-8 h-8 rounded-full">
+                                <span id="user-name" class="text-sm font-medium text-gray-700"></span>
+                                <button onclick="logout()" class="px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition">
+                                    <i class="fas fa-sign-out-alt"></i>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
-        </main>
+            </header>
+
+            <!-- Main Content -->
+            <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                <!-- Dashboard View -->
+                <div id="dashboard-view" class="view-section">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-6">대시보드</h2>
+                    
+                    <!-- Statistics -->
+                    <div id="statistics" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                        <div class="stat-card text-white p-6 rounded-xl">
+                            <i class="fas fa-database text-3xl mb-2"></i>
+                            <p class="text-sm opacity-90">총 추억</p>
+                            <p id="total-memories" class="text-4xl font-bold">0</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-green-400 to-green-600 text-white p-6 rounded-xl">
+                            <i class="fas fa-smile text-3xl mb-2"></i>
+                            <p class="text-sm opacity-90">긍정적 추억</p>
+                            <p id="positive-memories" class="text-4xl font-bold">0</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-blue-400 to-blue-600 text-white p-6 rounded-xl">
+                            <i class="fas fa-meh text-3xl mb-2"></i>
+                            <p class="text-sm opacity-90">중립적 추억</p>
+                            <p id="neutral-memories" class="text-4xl font-bold">0</p>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-400 to-orange-600 text-white p-6 rounded-xl">
+                            <i class="fas fa-chart-line text-3xl mb-2"></i>
+                            <p class="text-sm opacity-90">평균 중요도</p>
+                            <p id="avg-importance" class="text-4xl font-bold">0</p>
+                        </div>
+                    </div>
+
+                    <!-- Categories -->
+                    <div class="bg-white rounded-xl shadow-sm p-6 mb-8">
+                        <h3 class="text-xl font-bold text-gray-900 mb-4">카테고리별 분포</h3>
+                        <div id="categories-chart" class="space-y-3"></div>
+                    </div>
+
+                    <!-- Recent Memories -->
+                    <div class="bg-white rounded-xl shadow-sm p-6">
+                        <h3 class="text-xl font-bold text-gray-900 mb-4">최근 추억</h3>
+                        <div id="recent-memories" class="space-y-3"></div>
+                    </div>
+                </div>
+
+                <!-- Memories View -->
+                <div id="memories-view" class="view-section hidden">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+                        <h2 class="text-3xl font-bold text-gray-900">내 추억</h2>
+                        <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                            <select id="category-filter" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                <option value="">모든 카테고리</option>
+                            </select>
+                            <input id="search-input" type="text" placeholder="검색..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                        </div>
+                    </div>
+                    
+                    <div id="memories-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+                    
+                    <!-- Pagination -->
+                    <div id="pagination" class="flex justify-center mt-8 space-x-2"></div>
+                </div>
+
+                <!-- Timeline View -->
+                <div id="timeline-view" class="view-section hidden">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-6">타임라인</h2>
+                    <div id="timeline-content" class="space-y-6"></div>
+                </div>
+
+                <!-- Add/Edit Memory Modal -->
+                <div id="memory-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                        <div class="p-6">
+                            <div class="flex justify-between items-center mb-6">
+                                <h3 id="modal-title" class="text-2xl font-bold text-gray-900">추억 추가</h3>
+                                <button onclick="closeModal()" class="text-gray-500 hover:text-gray-700">
+                                    <i class="fas fa-times text-2xl"></i>
+                                </button>
+                            </div>
+                            
+                            <form id="memory-form" class="space-y-4">
+                                <input type="hidden" id="memory-id">
+                                
+                                <!-- File Upload Area -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                                        파일 업로드 (이미지/동영상)
+                                    </label>
+                                    <div id="upload-area" class="upload-area p-8 rounded-lg text-center cursor-pointer">
+                                        <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-2"></i>
+                                        <p class="text-sm text-gray-600">클릭하거나 파일을 드래그하세요</p>
+                                        <p class="text-xs text-gray-400 mt-1">또는 아래에 URL을 직접 입력하세요</p>
+                                        <input type="file" id="file-input" class="hidden" accept="image/*,video/*">
+                                    </div>
+                                    <input type="text" id="file-url" placeholder="또는 파일 URL 입력" class="mt-2 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 text-sm">
+                                    <div id="file-preview" class="mt-2"></div>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">제목 *</label>
+                                    <input type="text" id="title" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">카테고리</label>
+                                    <select id="category" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                        <option value="">선택하세요</option>
+                                    </select>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">설명</label>
+                                    <textarea id="description" rows="3" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"></textarea>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">내용</label>
+                                    <textarea id="content" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"></textarea>
+                                </div>
+
+                                <div>
+                                    <label class="flex items-center space-x-2">
+                                        <input type="checkbox" id="auto-analyze" checked class="rounded text-purple-600 focus:ring-purple-500">
+                                        <span class="text-sm text-gray-700">
+                                            <i class="fas fa-robot text-purple-600"></i>
+                                            AI 자동 분석 (요약, 감정, 키워드)
+                                        </span>
+                                    </label>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">중요도 (1-10)</label>
+                                    <input type="range" id="importance-score" min="1" max="10" value="5" class="w-full">
+                                    <div class="flex justify-between text-xs text-gray-500">
+                                        <span>1</span>
+                                        <span id="importance-value" class="font-bold text-purple-600">5</span>
+                                        <span>10</span>
+                                    </div>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">원본 날짜</label>
+                                    <input type="datetime-local" id="original-date" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
+                                </div>
+                                
+                                <div class="flex justify-end space-x-3 pt-4">
+                                    <button type="button" onclick="closeModal()" class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        취소
+                                    </button>
+                                    <button type="submit" class="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
+                                        <i class="fas fa-save mr-2"></i>저장
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Memory Detail Modal -->
+                <div id="detail-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                        <div class="p-6" id="detail-content">
+                            <!-- Content loaded dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
 
         <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
         <script>
             const API_BASE = '/api';
+            let currentUser = null;
             let currentPage = 1;
             let currentView = 'dashboard';
             let categories = [];
             let uploadedFileUrl = null;
 
-            // Initialize app
+            // ==================== Auth Functions ====================
+            
+            async function checkAuth() {
+                try {
+                    const response = await axios.get(\`\${API_BASE}/auth/me\`);
+                    currentUser = response.data.user;
+                    showMainApp();
+                } catch (error) {
+                    showAuthContainer();
+                }
+            }
+
+            function showAuthContainer() {
+                document.getElementById('auth-container').classList.remove('hidden');
+                document.getElementById('main-app').classList.add('hidden');
+            }
+
+            function showMainApp() {
+                document.getElementById('auth-container').classList.add('hidden');
+                document.getElementById('main-app').classList.remove('hidden');
+                document.getElementById('user-name').textContent = currentUser.name;
+                document.getElementById('user-avatar').src = currentUser.avatar_url;
+                init();
+            }
+
+            function showLogin() {
+                document.getElementById('login-form').classList.remove('hidden');
+                document.getElementById('register-form').classList.add('hidden');
+            }
+
+            function showRegister() {
+                document.getElementById('login-form').classList.add('hidden');
+                document.getElementById('register-form').classList.remove('hidden');
+            }
+
+            document.getElementById('login-submit').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const email = document.getElementById('login-email').value;
+                const password = document.getElementById('login-password').value;
+
+                try {
+                    const response = await axios.post(\`\${API_BASE}/auth/login\`, { email, password });
+                    currentUser = response.data.user;
+                    showMainApp();
+                } catch (error) {
+                    alert(error.response?.data?.error || '로그인에 실패했습니다');
+                }
+            });
+
+            document.getElementById('register-submit').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const name = document.getElementById('register-name').value;
+                const email = document.getElementById('register-email').value;
+                const password = document.getElementById('register-password').value;
+
+                try {
+                    const response = await axios.post(\`\${API_BASE}/auth/register\`, { name, email, password });
+                    currentUser = response.data.user;
+                    showMainApp();
+                } catch (error) {
+                    alert(error.response?.data?.error || '회원가입에 실패했습니다');
+                }
+            });
+
+            async function logout() {
+                if (!confirm('로그아웃 하시겠습니까?')) return;
+                
+                try {
+                    await axios.post(\`\${API_BASE}/auth/logout\`);
+                    currentUser = null;
+                    showAuthContainer();
+                } catch (error) {
+                    console.error('Logout error:', error);
+                }
+            }
+
+            // ==================== App Init ====================
+            
             async function init() {
                 await loadCategories();
                 await loadStatistics();
                 showView('dashboard');
-                
                 setupEventListeners();
             }
 
@@ -809,15 +1204,12 @@ app.get('/', (c) => {
                 
                 document.getElementById('memory-form').addEventListener('submit', handleMemorySubmit);
                 
-                // File upload
                 const uploadArea = document.getElementById('upload-area');
                 const fileInput = document.getElementById('file-input');
                 
                 uploadArea.addEventListener('click', () => fileInput.click());
-                
                 fileInput.addEventListener('change', handleFileSelect);
                 
-                // Drag and drop
                 uploadArea.addEventListener('dragover', (e) => {
                     e.preventDefault();
                     uploadArea.classList.add('dragover');
@@ -838,7 +1230,6 @@ app.get('/', (c) => {
                 });
             }
 
-            // Handle file selection
             async function handleFileSelect(e) {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -858,7 +1249,6 @@ app.get('/', (c) => {
                     </p>
                 \`;
                 
-                // Try to upload (will fail gracefully if R2 not configured)
                 try {
                     const formData = new FormData();
                     formData.append('file', file);
@@ -881,7 +1271,6 @@ app.get('/', (c) => {
                         </div>
                     \`;
                     
-                    // Show preview if image
                     if (file.type.startsWith('image/')) {
                         const reader = new FileReader();
                         reader.onload = (e) => {
@@ -905,7 +1294,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Load categories
             async function loadCategories() {
                 try {
                     const response = await axios.get(\`\${API_BASE}/categories\`);
@@ -924,7 +1312,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Load statistics
             async function loadStatistics() {
                 try {
                     const response = await axios.get(\`\${API_BASE}/statistics\`);
@@ -932,7 +1319,6 @@ app.get('/', (c) => {
                     
                     document.getElementById('total-memories').textContent = stats.total;
                     
-                    // Sentiment stats
                     const sentiments = stats.sentiments.reduce((acc, s) => {
                         acc[s.ai_sentiment] = s.count;
                         return acc;
@@ -940,7 +1326,6 @@ app.get('/', (c) => {
                     document.getElementById('positive-memories').textContent = sentiments.positive || 0;
                     document.getElementById('neutral-memories').textContent = sentiments.neutral || 0;
                     
-                    // Categories chart
                     const categoriesChart = document.getElementById('categories-chart');
                     categoriesChart.innerHTML = stats.byCategory.map(cat => \`
                         <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition">
@@ -957,7 +1342,6 @@ app.get('/', (c) => {
                         </div>
                     \`).join('');
                     
-                    // Recent memories
                     const recentMemories = document.getElementById('recent-memories');
                     recentMemories.innerHTML = stats.recent.map(memory => \`
                         <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer transition" onclick="showMemoryDetail(\${memory.id})">
@@ -979,7 +1363,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Load memories with pagination
             async function loadMemories() {
                 try {
                     const category = document.getElementById('category-filter').value;
@@ -995,7 +1378,6 @@ app.get('/', (c) => {
                     const response = await axios.get(\`\${API_BASE}/memories\`, { params });
                     const { data, pagination } = response.data;
                     
-                    // Render memories grid
                     const grid = document.getElementById('memories-grid');
                     grid.innerHTML = data.map(memory => \`
                         <div class="memory-card bg-white rounded-xl shadow-sm overflow-hidden cursor-pointer" onclick="showMemoryDetail(\${memory.id})">
@@ -1042,16 +1424,17 @@ app.get('/', (c) => {
                     renderPagination(pagination);
                 } catch (error) {
                     console.error('Error loading memories:', error);
+                    if (error.response?.status === 401) {
+                        showAuthContainer();
+                    }
                 }
             }
 
-            // Load timeline
             async function loadTimeline() {
                 try {
                     const response = await axios.get(\`\${API_BASE}/memories?limit=100\`);
                     const memories = response.data.data;
                     
-                    // Group by year and month
                     const grouped = memories.reduce((acc, memory) => {
                         const date = new Date(memory.original_date || memory.created_at);
                         const year = date.getFullYear();
@@ -1098,10 +1481,12 @@ app.get('/', (c) => {
                         \`).join('');
                 } catch (error) {
                     console.error('Error loading timeline:', error);
+                    if (error.response?.status === 401) {
+                        showAuthContainer();
+                    }
                 }
             }
 
-            // Render pagination
             function renderPagination(pagination) {
                 const paginationEl = document.getElementById('pagination');
                 const pages = [];
@@ -1124,7 +1509,6 @@ app.get('/', (c) => {
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             }
 
-            // Show memory detail
             async function showMemoryDetail(id) {
                 try {
                     const response = await axios.get(\`\${API_BASE}/memories/\${id}\`);
@@ -1233,6 +1617,9 @@ app.get('/', (c) => {
                 } catch (error) {
                     console.error('Error loading memory detail:', error);
                     alert('추억을 불러오는데 실패했습니다.');
+                    if (error.response?.status === 401) {
+                        showAuthContainer();
+                    }
                 }
             }
 
@@ -1241,7 +1628,6 @@ app.get('/', (c) => {
                 document.getElementById('detail-modal').classList.remove('flex');
             }
 
-            // Show add memory modal
             function showAddMemory() {
                 document.getElementById('modal-title').textContent = '추억 추가';
                 document.getElementById('memory-form').reset();
@@ -1252,7 +1638,6 @@ app.get('/', (c) => {
                 document.getElementById('memory-modal').classList.add('flex');
             }
 
-            // Edit memory
             async function editMemory(id) {
                 try {
                     const response = await axios.get(\`\${API_BASE}/memories/\${id}\`);
@@ -1289,7 +1674,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Handle memory form submit
             async function handleMemorySubmit(e) {
                 e.preventDefault();
                 
@@ -1327,10 +1711,12 @@ app.get('/', (c) => {
                 } catch (error) {
                     console.error('Error saving memory:', error);
                     alert('저장에 실패했습니다: ' + (error.response?.data?.error || error.message));
+                    if (error.response?.status === 401) {
+                        showAuthContainer();
+                    }
                 }
             }
 
-            // Delete memory
             async function deleteMemory(id) {
                 if (!confirm('정말 삭제하시겠습니까?')) return;
                 
@@ -1351,7 +1737,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Export data
             async function exportData() {
                 try {
                     const response = await axios.get(\`\${API_BASE}/export\`);
@@ -1377,7 +1762,6 @@ app.get('/', (c) => {
                 document.getElementById('memory-modal').classList.remove('flex');
             }
 
-            // Show view
             function showView(view) {
                 currentView = view;
                 document.getElementById('dashboard-view').classList.toggle('hidden', view !== 'dashboard');
@@ -1393,7 +1777,6 @@ app.get('/', (c) => {
                 }
             }
 
-            // Utility: debounce
             function debounce(func, wait) {
                 let timeout;
                 return function executedFunction(...args) {
@@ -1407,7 +1790,7 @@ app.get('/', (c) => {
             }
 
             // Initialize on page load
-            init();
+            checkAuth();
         </script>
     </body>
     </html>
