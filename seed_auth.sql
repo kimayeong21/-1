@@ -1,5 +1,7 @@
--- Update test user with password (bcrypt hash of "password123")
-UPDATE users SET password = '$2a$10$YourHashHere' WHERE id = 1;
+-- Update test user with password (SHA-256 hash of "password123")
+-- Password: password123
+-- Hash: ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f
+UPDATE users SET password = 'ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f' WHERE id = 1;
 
 -- Update existing memories with sample image URLs
 UPDATE memories SET 
