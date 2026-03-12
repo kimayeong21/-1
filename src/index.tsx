@@ -812,6 +812,129 @@ app.get('/', (c) => {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           }
           .hidden { display: none !important; }
+          
+          /* Floating Action Button - Enhanced */
+          .fab-button {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 999;
+            border: none;
+          }
+          .fab-button:hover {
+            transform: scale(1.1) rotate(90deg);
+            box-shadow: 0 12px 32px rgba(102, 126, 234, 0.6);
+          }
+          .fab-button:active {
+            transform: scale(0.95) rotate(90deg);
+          }
+          .fab-button i {
+            color: white;
+            font-size: 24px;
+            transition: transform 0.3s;
+          }
+          
+          /* FAB Sub-menu */
+          .fab-menu {
+            position: fixed;
+            bottom: 7rem;
+            right: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            z-index: 998;
+          }
+          .fab-menu-item {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: none;
+          }
+          .fab-menu-item.show {
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: all;
+          }
+          .fab-menu-button {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: white;
+            border: 2px solid #667eea;
+            color: #667eea;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+          }
+          .fab-menu-button:hover {
+            transform: scale(1.1);
+            background: #667eea;
+            color: white;
+          }
+          .fab-menu-button i {
+            font-size: 18px;
+          }
+          .fab-label {
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 24px;
+            font-size: 14px;
+            white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+          }
+          
+          @media (max-width: 768px) {
+            .fab-button {
+              bottom: 1.5rem;
+              right: 1.5rem;
+              width: 56px;
+              height: 56px;
+            }
+            .fab-button i {
+              font-size: 20px;
+            }
+            .fab-menu {
+              bottom: 6rem;
+              right: 1.5rem;
+            }
+            .fab-menu-button {
+              width: 44px;
+              height: 44px;
+            }
+            .fab-label {
+              font-size: 12px;
+              padding: 6px 12px;
+            }
+          }
+          .add-memory-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: 3px dashed rgba(255, 255, 255, 0.5);
+            transition: all 0.3s;
+            cursor: pointer;
+          }
+          .add-memory-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 16px 40px rgba(102, 126, 234, 0.4);
+            border-color: rgba(255, 255, 255, 0.8);
+          }
         </style>
     </head>
     <body class="bg-gray-50">
@@ -930,7 +1053,12 @@ app.get('/', (c) => {
             <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 <!-- Dashboard View -->
                 <div id="dashboard-view" class="view-section">
-                    <h2 class="text-3xl font-bold text-gray-900 mb-6">대시보드</h2>
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-3xl font-bold text-gray-900">대시보드</h2>
+                        <button onclick="showAddMemory()" class="px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-xl hover:from-purple-700 hover:to-purple-800 transition font-semibold shadow-lg">
+                            <i class="fas fa-plus-circle mr-2"></i>새 추억 추가
+                        </button>
+                    </div>
                     
                     <!-- Statistics -->
                     <div id="statistics" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -964,8 +1092,20 @@ app.get('/', (c) => {
 
                     <!-- Recent Memories -->
                     <div class="bg-white rounded-xl shadow-sm p-6">
-                        <h3 class="text-xl font-bold text-gray-900 mb-4">최근 추억</h3>
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-xl font-bold text-gray-900">최근 추억</h3>
+                            <button onclick="showView('memories')" class="text-sm text-purple-600 hover:text-purple-700 font-semibold">
+                                모두 보기 <i class="fas fa-arrow-right ml-1"></i>
+                            </button>
+                        </div>
                         <div id="recent-memories" class="space-y-3"></div>
+                        
+                        <!-- Quick Add Button in Dashboard -->
+                        <div onclick="showAddMemory()" class="add-memory-card mt-4 p-6 rounded-xl text-white text-center">
+                            <i class="fas fa-plus-circle text-5xl mb-3 opacity-90"></i>
+                            <p class="text-lg font-bold mb-1">첫 번째 추억을 추가하세요</p>
+                            <p class="text-sm opacity-75">클릭하여 소중한 순간을 기록하세요</p>
+                        </div>
                     </div>
                 </div>
 
@@ -974,6 +1114,9 @@ app.get('/', (c) => {
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
                         <h2 class="text-3xl font-bold text-gray-900">내 추억</h2>
                         <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                            <button onclick="showAddMemory()" class="px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-lg hover:from-purple-700 hover:to-purple-800 transition font-semibold shadow-lg">
+                                <i class="fas fa-plus-circle mr-2"></i>새 추억 추가
+                            </button>
                             <select id="category-filter" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
                                 <option value="">모든 카테고리</option>
                             </select>
@@ -981,7 +1124,9 @@ app.get('/', (c) => {
                         </div>
                     </div>
                     
-                    <div id="memories-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+                    <div id="memories-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                        <!-- Add Memory Card will be injected here -->
+                    </div>
                     
                     <!-- Pagination -->
                     <div id="pagination" class="flex justify-center mt-8 space-x-2"></div>
@@ -992,6 +1137,38 @@ app.get('/', (c) => {
                     <h2 class="text-3xl font-bold text-gray-900 mb-6">타임라인</h2>
                     <div id="timeline-content" class="space-y-6"></div>
                 </div>
+
+                <!-- Floating Action Button with Sub-menu -->
+                <div class="fab-menu">
+                    <div class="fab-menu-item" id="fab-photo">
+                        <span class="fab-label">사진 추가</span>
+                        <button onclick="showAddMemory('photo')" class="fab-menu-button">
+                            <i class="fas fa-camera"></i>
+                        </button>
+                    </div>
+                    <div class="fab-menu-item" id="fab-video">
+                        <span class="fab-label">동영상 추가</span>
+                        <button onclick="showAddMemory('video')" class="fab-menu-button">
+                            <i class="fas fa-video"></i>
+                        </button>
+                    </div>
+                    <div class="fab-menu-item" id="fab-document">
+                        <span class="fab-label">문서 추가</span>
+                        <button onclick="showAddMemory('document')" class="fab-menu-button">
+                            <i class="fas fa-file-alt"></i>
+                        </button>
+                    </div>
+                    <div class="fab-menu-item" id="fab-sns">
+                        <span class="fab-label">SNS 게시물</span>
+                        <button onclick="showAddMemory('sns')" class="fab-menu-button">
+                            <i class="fas fa-share-alt"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <button onclick="toggleFabMenu()" class="fab-button" title="추억 추가">
+                    <i class="fas fa-plus"></i>
+                </button>
 
                 <!-- Add/Edit Memory Modal -->
                 <div id="memory-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
@@ -1628,12 +1805,59 @@ app.get('/', (c) => {
                 document.getElementById('detail-modal').classList.remove('flex');
             }
 
-            function showAddMemory() {
+            let fabMenuOpen = false;
+            
+            function toggleFabMenu() {
+                fabMenuOpen = !fabMenuOpen;
+                const mainFab = document.querySelector('.fab-button i');
+                const photoItem = document.getElementById('fab-photo');
+                const videoItem = document.getElementById('fab-video');
+                const docItem = document.getElementById('fab-document');
+                const snsItem = document.getElementById('fab-sns');
+                
+                if (fabMenuOpen) {
+                    mainFab.style.transform = 'rotate(45deg)';
+                    setTimeout(() => photoItem.classList.add('show'), 50);
+                    setTimeout(() => videoItem.classList.add('show'), 100);
+                    setTimeout(() => docItem.classList.add('show'), 150);
+                    setTimeout(() => snsItem.classList.add('show'), 200);
+                } else {
+                    mainFab.style.transform = 'rotate(0deg)';
+                    photoItem.classList.remove('show');
+                    videoItem.classList.remove('show');
+                    docItem.classList.remove('show');
+                    snsItem.classList.remove('show');
+                }
+            }
+            
+            function showAddMemory(type = null) {
+                // Close FAB menu if open
+                if (fabMenuOpen) {
+                    toggleFabMenu();
+                }
+                
                 document.getElementById('modal-title').textContent = '추억 추가';
                 document.getElementById('memory-form').reset();
                 document.getElementById('memory-id').value = '';
                 document.getElementById('file-preview').innerHTML = '';
                 uploadedFileUrl = null;
+                
+                // Pre-select category based on type
+                const categorySelect = document.getElementById('category');
+                if (type === 'photo') {
+                    categorySelect.value = '1'; // 사진
+                    document.getElementById('modal-title').textContent = '📷 사진 추가';
+                } else if (type === 'video') {
+                    categorySelect.value = '2'; // 동영상
+                    document.getElementById('modal-title').textContent = '🎥 동영상 추가';
+                } else if (type === 'document') {
+                    categorySelect.value = '3'; // 문서
+                    document.getElementById('modal-title').textContent = '📄 문서 추가';
+                } else if (type === 'sns') {
+                    categorySelect.value = '4'; // SNS 게시물
+                    document.getElementById('modal-title').textContent = '💬 SNS 게시물 추가';
+                }
+                
                 document.getElementById('memory-modal').classList.remove('hidden');
                 document.getElementById('memory-modal').classList.add('flex');
             }
