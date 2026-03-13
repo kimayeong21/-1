@@ -1,6 +1,6 @@
-# MemoryLink - AI 기반 디지털 유품 정리 서비스 v3.3
+# MemoryLink - AI 기반 디지털 유품 정리 서비스 v3.4
 
-> ✅ **완전히 작동하는 프로덕션 준비 버전** - 로그인, 회원가입, 추억 추가/수정/삭제, 실시간 이미지 갤러리, AI 분석 통합, 향상된 FAB UI
+> ✅ **완전히 작동하는 프로덕션 준비 버전** - 로그인, 회원가입, 추억 추가/수정/삭제, 실시간 이미지 갤러리, AI 분석 통합, 향상된 FAB UI, **Python FastAPI 백엔드 추가**
 
 ## 📋 프로젝트 개요
 
@@ -440,3 +440,67 @@ tps://openai.com/) - AI 분석 API
 프로젝트에 대한 질문이나 제안사항이 있으시면 GitHub Issues를 통해 연락해주세요!
 
 **MemoryLink** - 소중한 추억을 영원히 간직하세요 💜
+
+## 🐍 Python FastAPI 백엔드 (NEW v3.4)
+
+### 주요 기능
+- ✅ **FastAPI 서버**: 고성능 비동기 Python 백엔드
+- ✅ **AI 분석 API**: 감정 분석, 키워드 추출, 요약 생성
+- ✅ **고급 통계**: 월별 추세, 카테고리 분포, 감정 분석
+- ✅ **일괄 처리**: 여러 추억 동시 분석
+- ✅ **데이터베이스 통합**: aiosqlite로 D1 SQLite 접근
+
+### API 엔드포인트 (포트 8000)
+```
+GET  /health                      # 헬스 체크
+POST /api/ai/analyze              # AI 텍스트 분석
+GET  /api/memories                # 추억 목록 조회
+GET  /api/stats/advanced          # 고급 통계
+POST /api/memories/batch-analyze  # 일괄 분석
+```
+
+### 빠른 시작
+```bash
+# Python 의존성 설치
+npm run python:install
+
+# Python API 서버 시작
+npm run dev:python
+
+# 헬스 체크
+npm run test:python
+```
+
+## 💻 VSCode 통합 개발 환경
+
+### 설치된 설정
+- ✅ **launch.json**: Python FastAPI 디버깅 설정
+- ✅ **tasks.json**: 빌드, 테스트, 서버 시작 태스크
+- ✅ **settings.json**: Python/TypeScript 포매터 설정
+- ✅ **extensions.json**: 권장 확장 프로그램
+
+### VSCode에서 실행하기
+
+1. **VSCode 열기**
+   ```bash
+   code /home/user/memorylink
+   ```
+
+2. **디버그 실행**
+   - `F5` 또는 Run > Start Debugging
+   - "Python: FastAPI" 선택 → Python API 디버깅
+   - "Node: Hono Dev Server" 선택 → Hono 서버 디버깅
+   - "MemoryLink Full Stack" 선택 → 동시 실행
+
+3. **터미널 작업**
+   - `Ctrl+Shift+B` → Build Task 실행
+   - Terminal > Run Task → 다양한 작업 선택
+
+### 권장 확장 프로그램
+- Python (ms-python.python)
+- Pylance (ms-python.vscode-pylance)
+- Black Formatter (ms-python.black-formatter)
+- ESLint (dbaeumer.vscode-eslint)
+- Prettier (esbenp.prettier-vscode)
+- Thunder Client (rangav.vscode-thunder-client)
+
