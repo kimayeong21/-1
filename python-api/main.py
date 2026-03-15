@@ -275,4 +275,18 @@ async def batch_analyze_memories(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("="*60)
+    print("🚀 MemoryLink Python API Server Starting...")
+    print("="*60)
+    print(f"📍 Host: http://0.0.0.0:8000")
+    print(f"📍 Local: http://localhost:8000")
+    print(f"📄 API Docs: http://localhost:8000/docs")
+    print(f"🔧 Health Check: http://localhost:8000/health")
+    print("="*60)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
